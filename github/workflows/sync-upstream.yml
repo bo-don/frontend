@@ -1,0 +1,43 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # Cron 表达式（UTC 时区）：每周一 00:00 执行
+    # 可通过 https://crontab.guru/ 生成自定义时间
+    - cron: '0 0 * * 1'
+  workflow_dispatch: # 允许在 Actions 页面手动触发
+
+permissions:
+  contents: write # 授予推送权限
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 必须拉取完整历史才能合并
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream Remote
+        run: |
+          # ⚠️ 替换为原仓库地址
+          git remote add upstream https://github.com/<上游用户名>/<上游仓库名>.git
+
+      - name: Fetch and Merge Upstream
+        run: |
+          git fetch upstream
+          # ⚠️ 若默认分支不是 main，请替换为 master 或其他分支名
+          git checkout main
+          git merge upstream/main --no-edit
+          # 如需自动解决冲突（以原仓库代码为准），可改为：
+          # git merge upstream/main --no-edit -X theirs
+
+      - name: Push Changes to Fork
+        run: git push origin main
