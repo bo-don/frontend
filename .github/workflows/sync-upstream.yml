@@ -2,7 +2,7 @@ name: Sync Fork with Upstream
 
 on:
   schedule:
-    - cron: '0 0 * * 1'  # UTC 周一 00:00（北京时间周一 08:00）
+    - cron: '0 0 * * 1'
   workflow_dispatch:
     inputs:
       conflict_strategy:
@@ -11,9 +11,9 @@ on:
         default: 'theirs'
         type: choice
         options:
-          - theirs  # 以上游为准
-          - ours    # 以本地为准
-          - none    # 失败告警
+          - theirs
+          - ours
+          - none
 
 permissions:
   contents: write
@@ -22,22 +22,15 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     env:
-      # 🔧 基础配置
       UPSTREAM_REPO: https://github.com/pure-admin/pure-admin-thin
       TARGET_BRANCH: main
-      
-      # 📬 钉钉配置
+      CONFLICT_STRATEGY: ${{ github.event.inputs.conflict_strategy || 'theirs' }}
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       
-      # ⚔️ 冲突策略（手动触发可覆盖）
-      CONFLICT_STRATEGY: ${{ github.event.inputs.conflict_strategy || 'theirs' }}
-      
-      # 📊 运行时状态
       SYNC_STATUS: 'pending'
       SYNC_MESSAGE: '同步执行中...'
       HAS_CONFLICT: 'false'
-      BACKUP_BRANCH: ''
 
     steps:
       - uses: actions/checkout@v4
@@ -51,66 +44,62 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Add Upstream Remote
-        run: git remote add upstream ${{ env.UPSTREAM_REPO }}
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream ${{ env.UPSTREAM_REPO }}
 
       - name: Fetch Upstream
         run: git fetch upstream
 
-      # 🔍 冲突预检测（干跑模式）
+      # 🔍 冲突预检测（修复版：安全 abort）
       - name: Check Potential Conflicts
         id: conflict_check
         run: |
           git checkout ${{ env.TARGET_BRANCH }}
           echo "BEFORE_MERGE=$(git rev-parse HEAD)" >> $GITHUB_ENV
           
-          # 尝试合并（不提交，检测冲突）
+          # 尝试干跑合并
           if ! git merge upstream/${{ env.TARGET_BRANCH }} --no-commit --no-ff 2>&1; then
             echo "HAS_CONFLICT=true" >> $GITHUB_ENV
             echo "CONFLICT_DETECTED=true" >> $GITHUB_OUTPUT
-            echo "⚠️ 检测到潜在冲突"
             
-            # 列出冲突文件
+            echo "⚠️ 检测到冲突文件:"
+            git diff --name-only --diff-filter=U > /tmp/conflict_files.txt 2>/dev/null || true
+            cat /tmp/conflict_files.txt
+            
             echo "CONFLICT_FILES<<EOF" >> $GITHUB_ENV
-            git diff --name-only --diff-filter=U >> $GITHUB_ENV
+            cat /tmp/conflict_files.txt >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
-            
-            # 取消合并，准备重新处理
-            git merge --abort
           else
             echo "CONFLICT_DETECTED=false" >> $GITHUB_OUTPUT
             echo "✅ 无冲突，可直接合并"
-            git merge --abort  # 干跑，取消合并
+          fi
+          
+          # ✅ 关键修复：只有存在 MERGE_HEAD 时才 abort
+          if [ -f .git/MERGE_HEAD ]; then
+            echo "🔧 检测到 MERGE_HEAD，执行 abort..."
+            git merge --abort
+          else
+            echo "ℹ️ 无 MERGE_HEAD，跳过 abort"
           fi
 
-      # 🔄 前置合并：创建备份分支（如有本地修改）
-      - name: Create Backup Branch
-        if: env.HAS_CONFLICT == 'true'
-        run: |
-          BACKUP_NAME="backup/${{ env.TARGET_BRANCH }}-$(date +%Y%m%d-%H%M%S)"
-          git checkout -b $BACKUP_NAME
-          git push origin $BACKUP_NAME
-          echo "BACKUP_BRANCH=$BACKUP_NAME" >> $GITHUB_ENV
-          echo "📦 已创建备份分支：$BACKUP_NAME"
-
-      # ⚔️ 执行正式合并（根据策略处理冲突）
+      # ⚔️ 执行正式合并
       - name: Merge with Strategy
         id: merge
         run: |
           git checkout ${{ env.TARGET_BRANCH }}
           
-          # 构建合并参数
           MERGE_ARGS="--no-edit"
           if [ "${{ env.CONFLICT_STRATEGY }}" = "theirs" ]; then
             MERGE_ARGS="$MERGE_ARGS -X theirs"
-            echo "📌 使用策略：以上游代码为准 (-X theirs)"
+            echo "📌 策略：以上游为准 (-X theirs)"
           elif [ "${{ env.CONFLICT_STRATEGY }}" = "ours" ]; then
             MERGE_ARGS="$MERGE_ARGS -X ours"
-            echo "📌 使用策略：以本地代码为准 (-X ours)"
+            echo "📌 策略：以本地为准 (-X ours)"
           else
-            echo "📌 使用策略：无自动解决（冲突则失败）"
+            echo "📌 策略：无自动解决"
           fi
           
-          # 执行合并
           if git merge upstream/${{ env.TARGET_BRANCH }} $MERGE_ARGS; then
             echo "AFTER_MERGE=$(git rev-parse HEAD)" >> $GITHUB_ENV
             echo "MERGE_RESULT=success" >> $GITHUB_OUTPUT
@@ -124,7 +113,7 @@ jobs:
             echo "MERGE_RESULT=failed" >> $GITHUB_OUTPUT
             echo "SYNC_STATUS=❌ 失败" >> $GITHUB_ENV
             echo "SYNC_MESSAGE=合并失败！冲突无法自动解决" >> $GITHUB_ENV
-            exit 0  # 继续执行通知
+            exit 0
           fi
 
       - name: Push to Fork
@@ -147,9 +136,7 @@ jobs:
               "msgtype": "markdown",
               "markdown": {
                 "title": "${{ env.SYNC_STATUS }} Fork 同步通知",
-                "text": "## ${{ env.SYNC_STATUS }} Fork 同步结果\n\n> **仓库**: ${{ github.repository }}\n> **分支**: `${{ env.TARGET_BRANCH }}`\n> **上游**: ${{ env.UPSTREAM_REPO }}\n> **冲突策略**: `${{ env.CONFLICT_STRATEGY }}`\n> **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}\n> **执行时间**: ${{ github.event.head_commit.timestamp || github.event.schedule }}\n\n### 📋 详情\n${{ env.SYNC_MESSAGE }}\n\n${{ env.HAS_CONFLICT == 'true' && '### ⚠️ 冲突检测\n检测到潜在冲突文件，已按策略自动处理\n' || '' }}\n${{ env.CONFLICT_FILES && format('**冲突文件**:\n```\n{0}\n```\n\n', env.CONFLICT_FILES) || '' }}\n${{ env.BACKUP_BRANCH && format('### 📦 备份分支\n已创建备份：`{0}`\n\n', env.BACKUP_BRANCH) || '' }}\n${{ env.MERGE_COMMITS && format('### 🔄 新增提交（最多 10 条）\n```\n{0}\n```\n\n', env.MERGE_COMMITS) || '' }}\n[🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+                "text": "## ${{ env.SYNC_STATUS }} Fork 同步结果\n\n> **仓库**: ${{ github.repository }}\n> **分支**: `${{ env.TARGET_BRANCH }}`\n> **上游**: ${{ env.UPSTREAM_REPO }}\n> **冲突策略**: `${{ env.CONFLICT_STRATEGY }}`\n> **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}\n\n### 📋 详情\n${{ env.SYNC_MESSAGE }}\n\n${{ env.CONFLICT_FILES && format('### ⚠️ 冲突文件\n```\n{0}\n```\n\n', env.CONFLICT_FILES) || '' }}\n${{ env.MERGE_COMMITS && format('### 🔄 新增提交\n```\n{0}\n```\n\n', env.MERGE_COMMITS) || '' }}\n[🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
               },
-              "at": {
-                "isAtAll": true
-              }
+              "at": { "isAtAll": true }
             }
