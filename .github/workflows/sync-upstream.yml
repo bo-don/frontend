@@ -1,41 +1,39 @@
-name: Sync Fork with Upstream
+name: Force Sync with Upstream
 
 on:
   schedule:
-    - cron: '0 0 * * 1'
-  workflow_dispatch:
-    inputs:
-      conflict_strategy:
-        description: '冲突解决策略'
-        required: false
-        default: 'theirs'
-        type: choice
-        options:
-          - theirs
-          - ours
-          - none
+    - cron: '0 0 * * 1'  # UTC 周一 00:00（北京时间周一 08:00）
+  workflow_dispatch:     # 支持手动触发
 
+# ⚠️ 关键：授予推送权限
 permissions:
   contents: write
 
+# ⚠️ 关键：强制使用 Node.js 24（避免弃用警告）
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  sync:
+  force-sync:
     runs-on: ubuntu-latest
     env:
+      # 🔧 配置项（按需修改）
       UPSTREAM_REPO: https://github.com/pure-admin/pure-admin-thin
       TARGET_BRANCH: main
-      CONFLICT_STRATEGY: ${{ github.event.inputs.conflict_strategy || 'theirs' }}
+      
+      # 📬 钉钉配置（从 Secrets 读取）
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       
+      # 📊 运行时状态
       SYNC_STATUS: 'pending'
-      SYNC_MESSAGE: '同步执行中...'
-      HAS_CONFLICT: 'false'
+      SYNC_MESSAGE: '执行强制同步中...'
 
     steps:
-      - uses: actions/checkout@v4
+      # ✅ 拉取代码（使用兼容 Node24 的版本）
+      - uses: actions/checkout@v4.2.2
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 必须拉取完整历史
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Git
@@ -43,100 +41,77 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Add Upstream Remote
+      # 🔍 可选：创建备份分支（防止误删重要修改）
+      - name: Create Backup (Optional)
         run: |
+          BACKUP_NAME="backup/$(date +%Y%m%d-%H%M%S)"
+          git checkout -b $BACKUP_NAME
+          git push origin $BACKUP_NAME
+          echo "📦 已创建备份分支: $BACKUP_NAME"
+          git checkout ${{ env.TARGET_BRANCH }}
+        continue-on-error: true  # 备份失败不影响主流程
+
+      # 🗑️ 核心：强制重置为上游最新状态
+      - name: Force Reset to Upstream
+        id: sync
+        run: |
+          # 添加/更新 upstream 远程
           git remote remove upstream 2>/dev/null || true
           git remote add upstream ${{ env.UPSTREAM_REPO }}
-
-      - name: Fetch Upstream
-        run: git fetch upstream
-
-      # 🔍 冲突预检测（修复版：安全 abort）
-      - name: Check Potential Conflicts
-        id: conflict_check
-        run: |
+          
+          # 拉取上游最新代码
+          git fetch upstream
+          
+          # 记录重置前的 commit（用于通知）
+          echo "BEFORE_RESET=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          
+          # 🗑️ 关键命令：硬重置，完全跟上上游
           git checkout ${{ env.TARGET_BRANCH }}
-          echo "BEFORE_MERGE=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          git reset --hard upstream/${{ env.TARGET_BRANCH }}
           
-          # 尝试干跑合并
-          if ! git merge upstream/${{ env.TARGET_BRANCH }} --no-commit --no-ff 2>&1; then
-            echo "HAS_CONFLICT=true" >> $GITHUB_ENV
-            echo "CONFLICT_DETECTED=true" >> $GITHUB_OUTPUT
-            
-            echo "⚠️ 检测到冲突文件:"
-            git diff --name-only --diff-filter=U > /tmp/conflict_files.txt 2>/dev/null || true
-            cat /tmp/conflict_files.txt
-            
-            echo "CONFLICT_FILES<<EOF" >> $GITHUB_ENV
-            cat /tmp/conflict_files.txt >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-          else
-            echo "CONFLICT_DETECTED=false" >> $GITHUB_OUTPUT
-            echo "✅ 无冲突，可直接合并"
-          fi
+          # 可选：清理未跟踪的文件（如本地生成的临时文件）
+          # git clean -fd
           
-          # ✅ 关键修复：只有存在 MERGE_HEAD 时才 abort
-          if [ -f .git/MERGE_HEAD ]; then
-            echo "🔧 检测到 MERGE_HEAD，执行 abort..."
-            git merge --abort
-          else
-            echo "ℹ️ 无 MERGE_HEAD，跳过 abort"
-          fi
+          # 记录重置后的 commit
+          echo "AFTER_RESET=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "SYNC_STATUS=✅ 成功" >> $GITHUB_ENV
+          echo "SYNC_MESSAGE=已强制重置为上游最新状态" >> $GITHUB_ENV
+          
+          echo "✅ 强制同步完成"
 
-      # ⚔️ 执行正式合并
-      - name: Merge with Strategy
-        id: merge
+      # 📤 推送重置后的代码到 Fork
+      - name: Force Push to Fork
         run: |
-          git checkout ${{ env.TARGET_BRANCH }}
-          
-          MERGE_ARGS="--no-edit"
-          if [ "${{ env.CONFLICT_STRATEGY }}" = "theirs" ]; then
-            MERGE_ARGS="$MERGE_ARGS -X theirs"
-            echo "📌 策略：以上游为准 (-X theirs)"
-          elif [ "${{ env.CONFLICT_STRATEGY }}" = "ours" ]; then
-            MERGE_ARGS="$MERGE_ARGS -X ours"
-            echo "📌 策略：以本地为准 (-X ours)"
-          else
-            echo "📌 策略：无自动解决"
-          fi
-          
-          if git merge upstream/${{ env.TARGET_BRANCH }} $MERGE_ARGS; then
-            echo "AFTER_MERGE=$(git rev-parse HEAD)" >> $GITHUB_ENV
-            echo "MERGE_RESULT=success" >> $GITHUB_OUTPUT
-            echo "SYNC_STATUS=✅ 成功" >> $GITHUB_ENV
-            if [ "${{ env.HAS_CONFLICT }}" = "true" ]; then
-              echo "SYNC_MESSAGE=检测到冲突，已按策略「${{ env.CONFLICT_STRATEGY }}」自动解决" >> $GITHUB_ENV
-            else
-              echo "SYNC_MESSAGE=上游代码已成功合并，无冲突" >> $GITHUB_ENV
-            fi
-          else
-            echo "MERGE_RESULT=failed" >> $GITHUB_OUTPUT
-            echo "SYNC_STATUS=❌ 失败" >> $GITHUB_ENV
-            echo "SYNC_MESSAGE=合并失败！冲突无法自动解决" >> $GITHUB_ENV
-            exit 0
-          fi
+          # 使用 --force 确保覆盖远程分支
+          git push origin ${{ env.TARGET_BRANCH }} --force
+          echo "✅ 已强制推送到 Fork"
 
-      - name: Push to Fork
-        if: steps.merge.outputs.MERGE_RESULT == 'success'
-        run: |
-          git push origin ${{ env.TARGET_BRANCH }}
-          echo "MERGE_COMMITS<<EOF" >> $GITHUB_ENV
-          git log ${{ env.BEFORE_MERGE }}..${{ env.AFTER_MERGE }} --oneline | head -10 >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
-      # 📬 钉钉通知
+      # 📬 钉钉通知（curl 原生实现，无 deprecated 依赖）
       - name: Send DingTalk Notification
         if: always()
-        uses: zcong1993/actions-ding@master
-        with:
-          dingToken: ${{ env.DINGTALK_WEBHOOK }}
-          secret: ${{ env.DINGTALK_SECRET }}
-          body: |
-            {
-              "msgtype": "markdown",
-              "markdown": {
-                "title": "${{ env.SYNC_STATUS }} Fork 同步通知",
-                "text": "## ${{ env.SYNC_STATUS }} Fork 同步结果\n\n> **仓库**: ${{ github.repository }}\n> **分支**: `${{ env.TARGET_BRANCH }}`\n> **上游**: ${{ env.UPSTREAM_REPO }}\n> **冲突策略**: `${{ env.CONFLICT_STRATEGY }}`\n> **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}\n\n### 📋 详情\n${{ env.SYNC_MESSAGE }}\n\n${{ env.CONFLICT_FILES && format('### ⚠️ 冲突文件\n```\n{0}\n```\n\n', env.CONFLICT_FILES) || '' }}\n${{ env.MERGE_COMMITS && format('### 🔄 新增提交\n```\n{0}\n```\n\n', env.MERGE_COMMITS) || '' }}\n[🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-              },
-              "at": { "isAtAll": true }
-            }
+        run: |
+          # 构建 Webhook URL（支持加签）
+          if [ -n "${{ env.DINGTALK_SECRET }}" ] && [ -n "${{ env.DINGTALK_WEBHOOK }}" ]; then
+            TIMESTAMP=$(date +%s000)
+            SIGN=$(echo -n "${TIMESTAMP}\n${{ env.DINGTALK_SECRET }}" | openssl dgst -sha256 -hmac "${{ env.DINGTALK_SECRET }}" -binary | base64)
+            WEBHOOK_URL="${{ env.DINGTALK_WEBHOOK }}&timestamp=${TIMESTAMP}&sign=${SIGN}"
+          else
+            WEBHOOK_URL="${{ env.DINGTALK_WEBHOOK }}"
+          fi
+          
+          # 发送 Markdown 消息
+          if [ -n "${WEBHOOK_URL}" ]; then
+            curl -s -X POST "${WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"msgtype\": \"markdown\",
+                \"markdown\": {
+                  \"title\": \"${{ env.SYNC_STATUS }} 强制同步通知\",
+                  \"text\": \"## ${{ env.SYNC_STATUS }} 强制同步结果\\n\\n> **仓库**: ${{ github.repository }}\\n> **分支**: \`${{ env.TARGET_BRANCH }}\`\\n> **上游**: ${{ env.UPSTREAM_REPO }}\\n> **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}\\n\\n### 📋 详情\\n${{ env.SYNC_MESSAGE }}\\n\\n### 🔄 变更摘要\\n\`Before\`: \`${{ env.BEFORE_RESET }}\`\\n\`After\`: \`${{ env.AFTER_RESET }}\`\\n\\n[🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"
+                },
+                \"at\": { \"isAtAll\": true }
+              }"
+            echo "✅ 钉钉通知已发送"
+          else
+            echo "⚠️ 未配置 DINGTALK_WEBHOOK，跳过通知"
+          fi
