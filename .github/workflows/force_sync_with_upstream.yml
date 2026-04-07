@@ -57,27 +57,18 @@ jobs:
           git push origin ${{ env.TARGET_BRANCH }}
 
       # 5️⃣ 钉钉通知（使用 x-actions/dingtalk）
-      - name: Sending Dingtalk Message
-        if: always()
-        uses: x-actions/dingtalk@master
-        env:
-          DINGTALK_ACCESS_TOKEN: ${{ secrets.DINGTALK_ACCESS_TOKEN }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-          MSGTYPE: markdown
-          TITLE: "Fork 同步通知"
-          TEXT: |
-            ## ${{ env.SYNC_STATUS }} 同步结果
-            
-            > **仓库**: ${{ github.repository }}
-            > **分支**: `${{ env.TARGET_BRANCH }}`
-            > **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}
-            > **执行时间**: $(date '+%Y-%m-%d %H:%M:%S')
-            
-            ### 📋 详情
-            ${{ env.SYNC_MESSAGE }}
-            
-            ### 🔄 提交变更
-            `Before`: `${{ env.BEFORE_SYNC }}`
-            `After`: `${{ env.AFTER_SYNC }}`
-            
-            [🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+      - name: Send dingding notify
+        uses: zcong1993/actions-ding@master
+        with:
+          dingToken: ${{ secrets.DINGTALK_ACCESS_TOKEN }}
+          secret: ${{ secrets.DING_SECRET }} # if secret set, action will call API with sign
+          body: |
+            {
+            "msgtype": "markdown",
+            "markdown": {
+                "title":""Fork 同步通知",                
+                "text": "## ${{ env.SYNC_STATUS }} 同步结果\n\n> **仓库**: ${{ github.repository }}\n> **分支**: `${{ env.TARGET_BRANCH }}`\n> **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}\n> **执行时间**: $(date '+%Y-%m-%d %H:%M:%S')\n\n### 📋 详情\n${{ env.SYNC_MESSAGE }}\n\n ### 🔄 提交变更\n`Before`: `${{ env.BEFORE_SYNC }}`\n`After`: `${{ env.AFTER_SYNC }}`\n\n[🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+              },
+                "isAtAll": false
+              }
+            }
