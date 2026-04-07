@@ -4,34 +4,37 @@ on:
   schedule:
     # UTC 22:00 = 北京时间 06:00（每天凌晨）
     - cron: '0 22 * * *'
-  workflow_dispatch:  # 手动触发测试
+  workflow_dispatch:  # 支持手动触发
 
 permissions:
   contents: write
+
+# 强制使用 Node.js 24（避免弃用警告）
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     env:
-      # 🔧 配置项
+      # 🔧 同步配置
       UPSTREAM_REPO: https://github.com/pure-admin/pure-admin-thin
       TARGET_BRANCH: main
-      
-      # 📬 钉钉配置
-      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
 
     steps:
+      # 1️⃣ 拉取代码
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # 2️⃣ 配置 Git
       - name: Setup Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # 3️⃣ 同步上游代码
       - name: Sync Upstream
         id: sync
         run: |
@@ -48,6 +51,33 @@ jobs:
           echo "SYNC_STATUS=✅ 成功" >> $GITHUB_ENV
           echo "SYNC_MESSAGE=上游代码已成功同步" >> $GITHUB_ENV
 
+      # 4️⃣ 推送到 Fork
       - name: Push to Fork
         run: |
           git push origin ${{ env.TARGET_BRANCH }}
+
+      # 5️⃣ 钉钉通知（使用 x-actions/dingtalk）
+      - name: Sending Dingtalk Message
+        if: always()
+        uses: x-actions/dingtalk@master
+        env:
+          DINGTALK_ACCESS_TOKEN: ${{ secrets.DINGTALK_ACCESS_TOKEN }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          MSGTYPE: markdown
+          TITLE: "Fork 同步通知"
+          TEXT: |
+            ## ${{ env.SYNC_STATUS }} 同步结果
+            
+            > **仓库**: ${{ github.repository }}
+            > **分支**: `${{ env.TARGET_BRANCH }}`
+            > **触发方式**: ${{ github.event_name == 'workflow_dispatch' && '🖱️ 手动' || '⏰ 定时' }}
+            > **执行时间**: $(date '+%Y-%m-%d %H:%M:%S')
+            
+            ### 📋 详情
+            ${{ env.SYNC_MESSAGE }}
+            
+            ### 🔄 提交变更
+            `Before`: `${{ env.BEFORE_SYNC }}`
+            `After`: `${{ env.AFTER_SYNC }}`
+            
+            [🔗 查看执行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
