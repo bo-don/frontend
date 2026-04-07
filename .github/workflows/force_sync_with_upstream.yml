@@ -1,0 +1,53 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # UTC 22:00 = 北京时间 06:00（每天凌晨）
+    - cron: '0 22 * * *'
+  workflow_dispatch:  # 手动触发测试
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      # 🔧 配置项
+      UPSTREAM_REPO: https://github.com/pure-admin/pure-admin-thin
+      TARGET_BRANCH: main
+      
+      # 📬 钉钉配置
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync Upstream
+        id: sync
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream ${{ env.UPSTREAM_REPO }}
+          git fetch upstream
+          
+          echo "BEFORE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          
+          git checkout ${{ env.TARGET_BRANCH }}
+          git merge upstream/${{ env.TARGET_BRANCH }} --no-edit -X theirs
+          
+          echo "AFTER_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "SYNC_STATUS=✅ 成功" >> $GITHUB_ENV
+          echo "SYNC_MESSAGE=上游代码已成功同步" >> $GITHUB_ENV
+
+      - name: Push to Fork
+        run: |
+          git push origin ${{ env.TARGET_BRANCH }}
