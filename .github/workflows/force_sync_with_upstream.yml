@@ -58,7 +58,7 @@ jobs:
 
       # 5️⃣ 钉钉通知
       - name: Send dingding notify
-        uses: bo-don/actions-dingding@v1.0.2
+        uses: bo-don/actions-dingding@v1.0.0
         with:
           dingToken: ${{ secrets.DINGTALK_ACCESS_TOKEN }}
           secret: ${{ secrets.DINGTALK_SECRET }} # if secret set, action will call API with sign
